@@ -35,3 +35,8 @@ huggingface_cache/
 # --- IDEs ---
 .vscode/
 .idea/
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
