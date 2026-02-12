@@ -4,6 +4,7 @@ Bootstraps the RAG pipeline and launches the Gradio web UI.
 """
 import logging
 import os
+import sys
 
 import gradio as gr
 from dotenv import load_dotenv
@@ -20,36 +21,61 @@ load_dotenv()
 setup_logging()
 logger = logging.getLogger(__name__)
 
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
-INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "resumes-index")
-RESUMES_DIR = os.getenv("RESUMES_DIR", "./resumes")
+
+def _require_env(name: str) -> str:
+    """Exit with a clear message if a required env var is missing."""
+    value = os.getenv(name, "").strip()
+    if not value:
+        logger.error(
+            "❌  Required environment variable '%s' is not set. "
+            "Copy .env.example → .env and fill in your keys.",
+            name,
+        )
+        sys.exit(1)
+    return value
+
+
+PINECONE_API_KEY = _require_env("PINECONE_API_KEY")
+HF_TOKEN        = _require_env("HUGGINGFACEHUB_API_TOKEN")
+INDEX_NAME      = os.getenv("PINECONE_INDEX_NAME", "resumes-index")
+RESUMES_DIR     = os.getenv("RESUMES_DIR", "./resumes")
 
 # ---------------------------------------------------------------------------
 # Auth & LLM
 # ---------------------------------------------------------------------------
-authenticate_huggingface()
-llm = get_llm()
+logger.info("🔐 Authenticating with HuggingFace...")
+authenticate_huggingface(token=HF_TOKEN)
+
+logger.info("🤖 Connecting to LLM...")
+llm = get_llm(hf_token=HF_TOKEN)
 
 # ---------------------------------------------------------------------------
 # Document ingestion
 # ---------------------------------------------------------------------------
-logger.info("Processing resumes from '%s'...", RESUMES_DIR)
+logger.info("📂 Loading resumes from '%s'...", RESUMES_DIR)
 docs = load_docs(RESUMES_DIR)
 
-if docs:
+if not docs:
+    logger.warning(
+        "⚠️  No PDF files found in '%s'. "
+        "Add resumes to that folder and re-run. "
+        "Falling back to existing Pinecone index (queries may return nothing).",
+        RESUMES_DIR,
+    )
+    vector_db = load_vector_store(
+        index_name=INDEX_NAME,
+        pinecone_api_key=PINECONE_API_KEY,
+    )
+else:
+    logger.info("✂️  Splitting %d document(s) into chunks...", len(docs))
     chunks = split_docs(docs)
+    logger.info("📤 Uploading %d chunks to Pinecone index '%s'...", len(chunks), INDEX_NAME)
     vector_db = create_vector_store(
         chunks=chunks,
         index_name=INDEX_NAME,
         pinecone_api_key=PINECONE_API_KEY,
     )
-    logger.info("Loaded %d resumes into Pinecone.", len(docs))
-else:
-    logger.warning("No resumes found. Loading existing Pinecone index.")
-    vector_db = load_vector_store(
-        index_name=INDEX_NAME,
-        pinecone_api_key=PINECONE_API_KEY,
-    )
+    logger.info("✅ %d resume(s) → %d chunks uploaded to Pinecone.", len(docs), len(chunks))
 
 # ---------------------------------------------------------------------------
 # Gradio UI
@@ -57,6 +83,8 @@ else:
 
 def screen_resume(user_question: str) -> str:
     """Handler wired to the Gradio submit button."""
+    if not user_question.strip():
+        return "Please enter a question."
     try:
         return ask_question(user_question, vector_db, llm)
     except Exception as exc:  # noqa: BLE001
