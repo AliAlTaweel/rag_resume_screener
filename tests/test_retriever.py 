@@ -1,0 +1,170 @@
+"""
+Tests for src/retriever/vector_store.py
+Covers: create_vector_store, load_vector_store, _ensure_index_exists
+"""
+from unittest.mock import MagicMock, call, patch
+
+import pytest
+from langchain_core.documents import Document
+
+from src.retriever import create_vector_store, load_vector_store
+from src.retriever.vector_store import _ensure_index_exists
+
+
+# ---------------------------------------------------------------------------
+# _ensure_index_exists
+# ---------------------------------------------------------------------------
+
+class TestEnsureIndexExists:
+    def test_creates_index_when_missing(self):
+        """Should call pc.create_index when the index is not present."""
+        pc = MagicMock()
+        pc.list_indexes.return_value = []  # No indexes exist
+
+        _ensure_index_exists(pc, "new-index")
+
+        pc.create_index.assert_called_once()
+        call_kwargs = pc.create_index.call_args[1]
+        assert call_kwargs["name"] == "new-index"
+
+    def test_skips_creation_when_index_exists(self):
+        """Should NOT call pc.create_index when the index already exists."""
+        existing_index = MagicMock()
+        existing_index.name = "existing-index"
+
+        pc = MagicMock()
+        pc.list_indexes.return_value = [existing_index]
+
+        _ensure_index_exists(pc, "existing-index")
+
+        pc.create_index.assert_not_called()
+
+    def test_uses_correct_dimension_and_metric(self):
+        """Index must be created with the expected dimension and metric."""
+        pc = MagicMock()
+        pc.list_indexes.return_value = []
+
+        _ensure_index_exists(pc, "test-index", dimension=384, metric="cosine")
+
+        _, kwargs = pc.create_index.call_args
+        assert kwargs["dimension"] == 384
+        assert kwargs["metric"] == "cosine"
+
+
+# ---------------------------------------------------------------------------
+# create_vector_store
+# ---------------------------------------------------------------------------
+
+class TestCreateVectorStore:
+    @patch("src.retriever.vector_store.PineconeVectorStore")
+    @patch("src.retriever.vector_store.get_embeddings")
+    @patch("src.retriever.vector_store.Pinecone")
+    def test_returns_vector_store(self, MockPinecone, mock_get_embeddings, MockVectorStore, sample_chunks):
+        """create_vector_store should return a PineconeVectorStore instance."""
+        mock_pc = MagicMock()
+        mock_pc.list_indexes.return_value = [MagicMock(name="resumes-index")]
+        MockPinecone.return_value = mock_pc
+
+        mock_get_embeddings.return_value = MagicMock()
+        mock_store = MagicMock()
+        MockVectorStore.from_documents.return_value = mock_store
+
+        result = create_vector_store(
+            chunks=sample_chunks,
+            index_name="resumes-index",
+            pinecone_api_key="fake-key",
+        )
+
+        assert result is mock_store
+
+    @patch("src.retriever.vector_store.PineconeVectorStore")
+    @patch("src.retriever.vector_store.get_embeddings")
+    @patch("src.retriever.vector_store.Pinecone")
+    def test_calls_from_documents_with_chunks(
+        self, MockPinecone, mock_get_embeddings, MockVectorStore, sample_chunks
+    ):
+        """from_documents must receive the chunks list."""
+        mock_pc = MagicMock()
+        mock_pc.list_indexes.return_value = []
+        MockPinecone.return_value = mock_pc
+        mock_get_embeddings.return_value = MagicMock()
+        MockVectorStore.from_documents.return_value = MagicMock()
+
+        create_vector_store(
+            chunks=sample_chunks,
+            index_name="idx",
+            pinecone_api_key="key",
+        )
+
+        call_kwargs = MockVectorStore.from_documents.call_args[1]
+        assert call_kwargs["documents"] is sample_chunks
+
+    @patch("src.retriever.vector_store.PineconeVectorStore")
+    @patch("src.retriever.vector_store.get_embeddings")
+    @patch("src.retriever.vector_store.Pinecone")
+    def test_initialises_pinecone_client_with_api_key(
+        self, MockPinecone, mock_get_embeddings, MockVectorStore, sample_chunks
+    ):
+        """Pinecone client must be initialised with the provided API key."""
+        mock_pc = MagicMock()
+        mock_pc.list_indexes.return_value = []
+        MockPinecone.return_value = mock_pc
+        mock_get_embeddings.return_value = MagicMock()
+        MockVectorStore.from_documents.return_value = MagicMock()
+
+        create_vector_store(sample_chunks, "idx", pinecone_api_key="secret-key")
+
+        MockPinecone.assert_called_once_with(api_key="secret-key")
+
+
+# ---------------------------------------------------------------------------
+# load_vector_store
+# ---------------------------------------------------------------------------
+
+class TestLoadVectorStore:
+    @patch("src.retriever.vector_store.PineconeVectorStore")
+    @patch("src.retriever.vector_store.get_embeddings")
+    @patch("src.retriever.vector_store.Pinecone")
+    def test_returns_existing_vector_store(
+        self, MockPinecone, mock_get_embeddings, MockVectorStore
+    ):
+        """load_vector_store should return a PineconeVectorStore for the given index."""
+        MockPinecone.return_value = MagicMock()
+        mock_get_embeddings.return_value = MagicMock()
+        mock_store = MagicMock()
+        MockVectorStore.return_value = mock_store
+
+        result = load_vector_store("my-index", "api-key")
+
+        assert result is mock_store
+
+    @patch("src.retriever.vector_store.PineconeVectorStore")
+    @patch("src.retriever.vector_store.get_embeddings")
+    @patch("src.retriever.vector_store.Pinecone")
+    def test_passes_correct_index_name(
+        self, MockPinecone, mock_get_embeddings, MockVectorStore
+    ):
+        """The index_name must be forwarded to PineconeVectorStore constructor."""
+        MockPinecone.return_value = MagicMock()
+        mock_get_embeddings.return_value = MagicMock()
+        MockVectorStore.return_value = MagicMock()
+
+        load_vector_store("target-index", "key")
+
+        _, kwargs = MockVectorStore.call_args
+        assert kwargs["index_name"] == "target-index"
+
+    @patch("src.retriever.vector_store.PineconeVectorStore")
+    @patch("src.retriever.vector_store.get_embeddings")
+    @patch("src.retriever.vector_store.Pinecone")
+    def test_does_not_call_from_documents(
+        self, MockPinecone, mock_get_embeddings, MockVectorStore
+    ):
+        """load_vector_store must NOT upsert any documents."""
+        MockPinecone.return_value = MagicMock()
+        mock_get_embeddings.return_value = MagicMock()
+        MockVectorStore.return_value = MagicMock()
+
+        load_vector_store("idx", "key")
+
+        MockVectorStore.from_documents.assert_not_called()
